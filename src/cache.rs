@@ -87,6 +87,20 @@ impl AssetMap {
         unsafe { Some((key.clone(), entry.inner().extend_lifetime())) }
     }
 
+    pub fn get_all(&self, type_id: TypeId) -> Vec<UntypedHandle> {
+        let mut result = Vec::new();
+        for shard in self.shards.iter() {
+            let shard = shard.0.read();
+            for (key, entry) in shard.iter() {
+                if key.type_id == type_id {
+                    unsafe { result.push(entry.inner().extend_lifetime()) };
+                }
+            }
+        }
+
+        result
+    }
+
     pub fn insert(&self, id: SharedString, type_id: TypeId, entry: CacheEntry) -> UntypedHandle {
         let key = OwnedKey::new_with(id, type_id);
         let shard = &mut *self.get_shard(key.borrow()).0.write();
@@ -378,6 +392,16 @@ impl<S> AssetCache<S> {
         if let Some(reloader) = &self.reloader {
             reloader.clear();
         }
+    }
+
+    /// Get handles to all assets of the given type.
+    #[inline]
+    pub fn get_all<A: Storable>(&self) -> Vec<Handle<A>> {
+        let untyped = self.assets.get_all(TypeId::of::<A>());
+        untyped
+            .into_iter()
+            .map(|handle| handle.downcast::<A>())
+            .collect::<Vec<Handle<A>>>()
     }
 }
 
