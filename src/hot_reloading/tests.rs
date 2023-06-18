@@ -3,7 +3,7 @@ use crate::{
     tests::{X, XS, Y, Z},
     AssetCache,
 };
-use std::{borrow::Cow, fs::File, io, io::Write, path::Path, sync::Arc};
+use std::{fs::File, io, io::Write, path::Path, sync::Arc};
 
 fn sleep() {
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -13,7 +13,7 @@ type Res = Result<(), Box<dyn std::error::Error>>;
 
 fn write_i32(path: &Path, n: i32) -> io::Result<()> {
     let mut file = File::create(path)?;
-    write!(file, "{}", n)
+    write!(file, "{n}")
 }
 
 macro_rules! test_scenario {
@@ -43,7 +43,7 @@ macro_rules! test_scenario {
 
             test_scenario!(@leak cache $is_static);
 
-            let path = cache.source().path_of(DirEntry::File(id, "x"));
+            let path = cache.raw_source().path_of(DirEntry::File(id, "x"));
             write_i32(&path, $n)?;
             sleep();
 
@@ -146,7 +146,7 @@ fn messages() {
         fn send_update(&self, message: UpdateMessage) {
             match self.0.lock().pop() {
                 Some(expected) => assert_eq!(message, expected),
-                None => panic!("Unexpected message {:?}", message),
+                None => panic!("Unexpected message {message:?}"),
             }
         }
     }
@@ -163,8 +163,8 @@ fn messages() {
     struct TestSource;
 
     impl crate::source::Source for TestSource {
-        fn read(&self, _id: &str, _ext: &str) -> io::Result<Cow<[u8]>> {
-            Ok(Cow::Borrowed(b"10"))
+        fn read(&self, _id: &str, _ext: &str) -> io::Result<crate::source::FileContent> {
+            Ok(crate::source::FileContent::Slice(b"10"))
         }
 
         fn read_dir(&self, _id: &str, _f: &mut dyn FnMut(DirEntry)) -> io::Result<()> {

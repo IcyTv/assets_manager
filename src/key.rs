@@ -20,37 +20,48 @@ pub(crate) trait AnyAsset: Send + Sync + 'static {
 #[cfg(feature = "hot-reloading")]
 impl<A: Asset> AnyAsset for A {
     fn reload(self: Box<Self>, entry: UntypedHandle) {
-        entry.downcast().as_dynamic().write(*self);
+        entry.downcast().write(*self);
     }
 
     fn create(self: Box<Self>, id: SharedString) -> CacheEntry {
-        CacheEntry::new(*self, id)
+        CacheEntry::new(*self, id, || true)
     }
 }
 
 #[cfg(feature = "hot-reloading")]
-fn reload<T: Compound>(cache: AnyCache, id: &str) -> Option<Dependencies> {
+fn reload<T: Compound>(cache: AnyCache, id: SharedString) -> Option<Dependencies> {
     // Outline these functions to reduce the amount of monomorphized code
-    fn log_ok(id: &str) {
-        log::info!("Reloading \"{}\"", id);
+    fn log_ok(id: SharedString) {
+        log::info!("Reloading \"{id}\"");
     }
-    fn log_err(id: &str, err: crate::BoxedError) {
-        log::warn!("Error reloading \"{}\": {}", id, err);
+    fn load_untyped(
+        cache: AnyCache,
+        id: SharedString,
+        typ: Type,
+    ) -> Option<(UntypedHandle, CacheEntry, Dependencies)> {
+        let handle = cache.get_cached_untyped(&id, typ)?;
+
+        let load_fn = || (typ.inner.load)(cache, id);
+        let (entry, deps) = if let Some(reloader) = cache.reloader() {
+            crate::hot_reloading::records::record(reloader, load_fn)
+        } else {
+            (load_fn(), Dependencies::empty())
+        };
+        match entry {
+            Ok(e) => Some((handle, e, deps)),
+            Err(err) => {
+                log::warn!("Error reloading \"{}\": {}", err.id(), err.reason());
+                None
+            }
+        }
     }
 
-    let handle = cache.get_cached::<T>(id)?;
+    let (handle, entry, deps) = load_untyped(cache, id, Type::of::<T>())?;
 
-    match cache.record_load::<T>(id) {
-        Ok((asset, deps)) => {
-            handle.as_dynamic().write(asset);
-            log_ok(id);
-            Some(deps)
-        }
-        Err(err) => {
-            log_err(id, err);
-            None
-        }
-    }
+    let (asset, id) = entry.into_inner();
+    handle.downcast::<T>().write(asset);
+    log_ok(id);
+    Some(deps)
 }
 
 pub(crate) struct AssetTypeInner {
@@ -58,12 +69,12 @@ pub(crate) struct AssetTypeInner {
 
     #[cfg(feature = "hot-reloading")]
     #[allow(clippy::type_complexity)]
-    pub load_from_source: fn(&dyn Source, id: &str) -> Result<Box<dyn AnyAsset>, Error>,
+    pub load_from_source: fn(&dyn Source, id: &SharedString) -> Result<Box<dyn AnyAsset>, Error>,
 }
 
 pub(crate) struct CompoundTypeInner {
     #[cfg(feature = "hot-reloading")]
-    pub reload: fn(AnyCache, &str) -> Option<Dependencies>,
+    pub reload: crate::hot_reloading::ReloadFn,
 }
 
 pub(crate) enum InnerType {
@@ -75,14 +86,17 @@ pub(crate) enum InnerType {
 impl Inner {
     fn of_asset<T: Asset>() -> &'static Self {
         #[cfg(feature = "hot-reloading")]
-        fn load<A: Asset>(source: &dyn Source, id: &str) -> Result<Box<dyn AnyAsset>, Error> {
-            let asset = load_from_source::<A, _>(source, id)?;
+        fn load<A: Asset>(
+            source: &dyn Source,
+            id: &SharedString,
+        ) -> Result<Box<dyn AnyAsset>, Error> {
+            let asset = load_from_source::<A>(source, id)?;
             Ok(Box::new(asset))
         }
 
         &Self {
             hot_reloaded: T::HOT_RELOADED,
-            load: T::_load_entry::<utils::Private>,
+            load: T::_load_entry,
             typ: InnerType::Asset(AssetTypeInner {
                 extensions: T::EXTENSIONS,
                 #[cfg(feature = "hot-reloading")]
@@ -94,7 +108,7 @@ impl Inner {
     fn of_compound<T: Compound>() -> &'static Self {
         &Self {
             hot_reloaded: T::HOT_RELOADED,
-            load: T::_load_entry::<utils::Private>,
+            load: T::_load_entry,
             typ: InnerType::Compound(CompoundTypeInner {
                 #[cfg(feature = "hot-reloading")]
                 reload: reload::<T>,
@@ -103,7 +117,7 @@ impl Inner {
     }
 
     fn of_storable<T: Storable>() -> &'static Self {
-        fn load(_: AnyCache, _: &SharedString) -> Result<CacheEntry, Error> {
+        fn load(_: AnyCache, _: SharedString) -> Result<CacheEntry, Error> {
             panic!("Attempted to load `Storable` type")
         }
 
@@ -117,7 +131,7 @@ impl Inner {
 
 pub(crate) struct Inner {
     hot_reloaded: bool,
-    pub load: fn(AnyCache, id: &SharedString) -> Result<CacheEntry, Error>,
+    pub load: fn(AnyCache, id: SharedString) -> Result<CacheEntry, Error>,
     pub typ: InnerType,
 }
 
@@ -151,7 +165,7 @@ impl AssetType {
     pub(crate) fn load_from_source<S: Source>(
         self,
         source: &S,
-        id: &str,
+        id: &SharedString,
     ) -> Result<Box<dyn AnyAsset>, Error> {
         (self.inner.load_from_source)(source, id)
     }

@@ -52,6 +52,7 @@ impl<T> DynamicInner<T> {
         }
     }
 
+    #[inline]
     pub fn write(&self, value: T) {
         let mut data = self.value.write();
         *data = value;
@@ -68,12 +69,13 @@ impl CacheEntry {
     ///
     /// The returned structure can safely use its methods with type parameter `T`.
     #[inline]
-    pub fn new<T: Storable>(asset: T, id: SharedString) -> Self {
+    pub fn new<T: Storable>(asset: T, id: SharedString, _mutable: impl FnOnce() -> bool) -> Self {
         #[cfg(not(feature = "hot-reloading"))]
         let inner = Box::new(StaticInner::new(asset, id));
 
+        // Even if hot-reloading is enabled, we can avoid the lock in some cases.
         #[cfg(feature = "hot-reloading")]
-        let inner: Box<dyn Any + Send + Sync> = if T::HOT_RELOADED {
+        let inner: Box<dyn Any + Send + Sync> = if T::HOT_RELOADED && _mutable() {
             Box::new(DynamicInner::new(asset, id))
         } else {
             Box::new(StaticInner::new(asset, id))
@@ -90,15 +92,20 @@ impl CacheEntry {
 
     /// Consumes the `CacheEntry` and returns its inner value.
     #[inline]
-    pub fn into_inner<T: 'static>(self) -> (T, SharedString) {
-        let _this = match self.0.downcast::<StaticInner<T>>() {
-            Ok(inner) => return (inner.value, inner.id),
-            Err(this) => this,
-        };
+    pub fn into_inner<T: Storable>(self) -> (T, SharedString) {
+        #[allow(unused_mut)]
+        let mut this = self.0;
 
         #[cfg(feature = "hot-reloading")]
-        if let Ok(inner) = _this.downcast::<DynamicInner<T>>() {
-            return (inner.value.into_inner(), inner.id);
+        if T::HOT_RELOADED {
+            match this.downcast::<DynamicInner<T>>() {
+                Ok(inner) => return (inner.value.into_inner(), inner.id),
+                Err(t) => this = t,
+            }
+        }
+
+        if let Ok(inner) = this.downcast::<StaticInner<T>>() {
+            return (inner.value, inner.id);
         }
 
         wrong_handle_type()
@@ -122,12 +129,12 @@ impl<'a> UntypedHandle<'a> {
     }
 
     #[inline]
-    pub fn try_downcast<T: 'static>(self) -> Option<Handle<'a, T>> {
+    pub fn try_downcast<T: Storable>(self) -> Option<Handle<'a, T>> {
         Handle::new(self)
     }
 
     #[inline]
-    pub fn downcast<T: 'static>(self) -> Handle<'a, T> {
+    pub fn downcast<T: Storable>(self) -> Handle<'a, T> {
         match self.try_downcast() {
             Some(h) => h,
             None => wrong_handle_type(),
@@ -179,16 +186,19 @@ impl<'a, T> Handle<'a, T> {
     /// `inner` must contain a `StaticInner<T>` or a `DynamicInner<T>`.
     fn new(inner: UntypedHandle<'a>) -> Option<Self>
     where
-        T: 'static,
+        T: Storable,
     {
+        #[allow(clippy::never_loop)]
         let inner = loop {
-            if let Some(inner) = inner.0.downcast_ref::<StaticInner<T>>() {
-                break HandleInner::Static(inner);
+            #[cfg(feature = "hot-reloading")]
+            if T::HOT_RELOADED {
+                if let Some(inner) = inner.0.downcast_ref::<DynamicInner<T>>() {
+                    break HandleInner::Dynamic(inner);
+                }
             }
 
-            #[cfg(feature = "hot-reloading")]
-            if let Some(inner) = inner.0.downcast_ref::<DynamicInner<T>>() {
-                break HandleInner::Dynamic(inner);
+            if let Some(inner) = inner.0.downcast_ref::<StaticInner<T>>() {
+                break HandleInner::Static(inner);
             }
 
             return None;
@@ -212,8 +222,8 @@ impl<'a, T> Handle<'a, T> {
 
     #[inline]
     #[cfg(feature = "hot-reloading")]
-    pub(crate) fn as_dynamic(&self) -> &DynamicInner<T> {
-        self.either(|_| wrong_handle_type(), |this| this)
+    pub(crate) fn write(&self, value: T) {
+        self.either(|_| wrong_handle_type(), |this| this.write(value))
     }
 
     /// Locks the pointed asset for reading.
@@ -238,7 +248,7 @@ impl<'a, T> Handle<'a, T> {
     /// Note that the lifetime of the returned `&str` is tied to that of the
     /// `AssetCache`, so it can outlive the handle.
     #[inline]
-    pub fn id(&self) -> &'a str {
+    pub fn id(&self) -> &'a SharedString {
         self.either(|s| &s.id, |d| &d.id)
     }
 
@@ -321,6 +331,7 @@ where
     ///
     /// This method only works if hot-reloading is disabled for the given type.
     #[inline]
+    #[allow(clippy::let_unit_value)]
     pub fn get(&self) -> &'a A {
         let _ = A::_CHECK_NOT_HOT_RELOADED;
 
@@ -439,7 +450,7 @@ where
 {
     #[inline]
     fn as_ref(&self) -> &U {
-        (&**self).as_ref()
+        (**self).as_ref()
     }
 }
 

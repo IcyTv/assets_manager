@@ -5,14 +5,13 @@ use crate::{
 };
 
 use std::{
-    borrow::Cow,
     fmt, hash, io,
     path::{self, Path},
     sync::Arc,
 };
 
-use _zip::{read::ZipFile, ZipArchive};
 use sync_file::SyncFile;
+use zip::{read::ZipFile, ZipArchive};
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct FileDesc(Arc<(String, String)>);
@@ -199,7 +198,7 @@ fn register_file(
     .is_some();
 
     if !ok {
-        log::warn!("Unsupported path in zip archive: {:?}", path);
+        log::warn!("Unsupported path in zip archive: {path:?}");
     }
 }
 
@@ -256,7 +255,7 @@ where
     pub fn from_reader(reader: R) -> io::Result<Zip<R>> {
         let mut archive = ZipArchive::new(reader)?;
 
-        let len = archive.len() as usize;
+        let len = archive.len();
         let mut files = HashMap::with_capacity(len);
         let mut dirs = HashMap::new();
         let mut id_builder = IdBuilder::default();
@@ -279,7 +278,7 @@ impl<R> Source for Zip<R>
 where
     R: io::Read + io::Seek + Clone,
 {
-    fn read(&self, id: &str, ext: &str) -> io::Result<Cow<[u8]>> {
+    fn read(&self, id: &str, ext: &str) -> io::Result<super::FileContent> {
         use io::Read;
 
         // Get the file within the archive
@@ -292,7 +291,7 @@ where
         let mut content = Vec::with_capacity(file.size() as usize + 1);
         file.read_to_end(&mut content)?;
 
-        Ok(Cow::Owned(content))
+        Ok(super::FileContent::Buffer(content))
     }
 
     fn read_dir(&self, id: &str, f: &mut dyn FnMut(DirEntry)) -> io::Result<()> {

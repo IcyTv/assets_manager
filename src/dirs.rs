@@ -36,7 +36,7 @@ use crate::AssetCache;
 ///
 /// // Specify how to load a playlist
 /// impl Compound for Playlist {
-///     fn load(cache: AnyCache, id: &str) -> Result<Self, BoxedError> {
+///     fn load(cache: AnyCache, id: &SharedString) -> Result<Self, BoxedError> {
 ///         // Read the manifest (a list of ids)
 ///         let manifest = cache.load::<Json<Vec<String>>>(id)?.read();
 ///
@@ -51,11 +51,11 @@ use crate::AssetCache;
 ///
 /// // Specify how to get ids of playlists in a directory
 /// impl DirLoadable for Playlist {
-///     fn select_ids<S: Source + ?Sized>(source: &S, id: &str) -> std::io::Result<Vec<SharedString>> {
+///     fn select_ids(cache: AnyCache, id: &SharedString) -> std::io::Result<Vec<SharedString>> {
 ///         let mut ids = Vec::new();
 ///
 ///         // Select all files with "json" extension (manifest files)
-///         source.read_dir(id, &mut |entry| {
+///         cache.raw_source().read_dir(id, &mut |entry| {
 ///             if let DirEntry::File(id, ext) = entry {
 ///                 if ext == "json" {
 ///                     ids.push(id.into());
@@ -73,7 +73,22 @@ pub trait DirLoadable: Send + Sync + 'static {
     ///
     /// Note that the order of the returned ids is not kept, and that redundant
     /// ids are removed.
-    fn select_ids<S: Source + ?Sized>(source: &S, id: &str) -> io::Result<Vec<SharedString>>;
+    fn select_ids(cache: AnyCache, id: &SharedString) -> io::Result<Vec<SharedString>>;
+
+    /// Executes the given closure for each id of a child directory of the given
+    /// directory. The default implementation reads the cache's source.
+    #[inline]
+    fn sub_directories(
+        cache: AnyCache,
+        id: &SharedString,
+        mut f: impl FnMut(&str),
+    ) -> io::Result<()> {
+        cache.raw_source().read_dir(id, &mut |entry| {
+            if let DirEntry::Directory(id) = entry {
+                f(id);
+            }
+        })
+    }
 }
 
 impl<A> DirLoadable for A
@@ -81,16 +96,12 @@ where
     A: Asset,
 {
     #[inline]
-    fn select_ids<S: Source + ?Sized>(source: &S, id: &str) -> io::Result<Vec<SharedString>> {
-        fn inner<S: Source + ?Sized>(
-            source: &S,
-            id: &str,
-            extensions: &[&str],
-        ) -> io::Result<Vec<SharedString>> {
+    fn select_ids(cache: AnyCache, id: &SharedString) -> io::Result<Vec<SharedString>> {
+        fn inner(cache: AnyCache, id: &str, extensions: &[&str]) -> io::Result<Vec<SharedString>> {
             let mut ids = Vec::new();
 
             // Select all files with an extension valid for type `A`
-            source.read_dir(id, &mut |entry| {
+            cache.raw_source().read_dir(id, &mut |entry| {
                 if let DirEntry::File(id, ext) = entry {
                     if extensions.contains(&ext) {
                         ids.push(id.into());
@@ -101,7 +112,7 @@ where
             Ok(ids)
         }
 
-        inner(source, id, A::EXTENSIONS)
+        inner(cache, id, A::EXTENSIONS)
     }
 }
 
@@ -110,8 +121,8 @@ where
     A: DirLoadable,
 {
     #[inline]
-    fn select_ids<S: Source + ?Sized>(source: &S, id: &str) -> io::Result<Vec<SharedString>> {
-        A::select_ids(source, id)
+    fn select_ids(cache: AnyCache, id: &SharedString) -> io::Result<Vec<SharedString>> {
+        A::select_ids(cache, id)
     }
 }
 
@@ -125,9 +136,10 @@ impl<A> Compound for CachedDir<A>
 where
     A: DirLoadable,
 {
-    fn load(cache: crate::AnyCache, id: &str) -> Result<Self, BoxedError> {
-        let mut ids =
-            A::select_ids(&cache.source(), id).map_err(|err| Error::from_io(id.into(), err))?;
+    fn load(cache: crate::AnyCache, id: &SharedString) -> Result<Self, BoxedError> {
+        let mut ids = cache
+            .no_record(|| A::select_ids(cache, id))
+            .map_err(|err| Error::from_io(id.clone(), err))?;
 
         // Remove duplicated entries
         ids.sort_unstable();
@@ -160,22 +172,18 @@ impl<A> Compound for CachedRecDir<A>
 where
     A: DirLoadable,
 {
-    fn load(cache: crate::AnyCache, id: &str) -> Result<Self, BoxedError> {
+    fn load(cache: crate::AnyCache, id: &SharedString) -> Result<Self, BoxedError> {
         // Load the current directory
         let this = cache.load::<CachedDir<A>>(id)?;
         let mut ids = this.get().ids.clone();
 
         // Recursively load child directories
-        cache
-            .source()
-            .read_dir(id, &mut |entry| {
-                if let DirEntry::Directory(id) = entry {
-                    if let Ok(child) = cache.load::<CachedRecDir<A>>(id) {
-                        ids.extend_from_slice(&child.get().ids);
-                    }
-                }
-            })
-            .map_err(|err| Error::from_io(id.into(), err))?;
+        A::sub_directories(cache, id, |id| {
+            if let Ok(child) = cache.load::<CachedRecDir<A>>(id) {
+                ids.extend_from_slice(&child.get().ids);
+            }
+        })
+        .map_err(|err| Error::from_io(id.clone(), err))?;
 
         Ok(CachedRecDir {
             ids,
@@ -212,7 +220,7 @@ where
     A: DirLoadable,
 {
     #[inline]
-    fn id(self) -> &'a str {
+    fn id(self) -> &'a SharedString {
         match self {
             Self::Simple(handle) => handle.id(),
             Self::Recursive(handle) => handle.id(),
@@ -233,7 +241,6 @@ where
 /// This type provides methods to access assets within a directory.
 pub struct DirHandle<'a, A> {
     inner: DirHandleInner<'a, A>,
-    cache: AnyCache<'a>,
 }
 
 impl<'a, A> DirHandle<'a, A>
@@ -241,31 +248,31 @@ where
     A: DirLoadable,
 {
     #[inline]
-    pub(crate) fn new(handle: Handle<'a, CachedDir<A>>, cache: AnyCache<'a>) -> Self {
+    pub(crate) fn new(handle: Handle<'a, CachedDir<A>>) -> Self {
         let inner = DirHandleInner::Simple(handle);
-        DirHandle { inner, cache }
+        DirHandle { inner }
     }
 
     #[inline]
-    pub(crate) fn new_rec(handle: Handle<'a, CachedRecDir<A>>, cache: AnyCache<'a>) -> Self {
+    pub(crate) fn new_rec(handle: Handle<'a, CachedRecDir<A>>) -> Self {
         let inner = DirHandleInner::Recursive(handle);
-        DirHandle { inner, cache }
+        DirHandle { inner }
     }
 
     /// The id of the directory handle.
     #[inline]
-    pub fn id(self) -> &'a str {
+    pub fn id(self) -> &'a SharedString {
         self.inner.id()
     }
 
     /// Returns an iterator over the ids of the assets in the directory.
     #[inline]
-    pub fn ids(self) -> impl ExactSizeIterator<Item = &'a str> {
-        self.inner.ids().iter().map(|id| &**id)
+    pub fn ids(self) -> impl ExactSizeIterator<Item = &'a SharedString> {
+        self.inner.ids().iter()
     }
 }
 
-impl<'a, A> DirHandle<'a, A>
+impl<'h, A> DirHandle<'h, A>
 where
     A: DirLoadable + crate::Storable,
 {
@@ -274,15 +281,15 @@ where
     /// This fonction does not do any I/O and assets that previously failed to
     /// load are ignored.
     #[inline]
-    pub fn iter_cached(self) -> impl Iterator<Item = Handle<'a, A>> {
-        self.inner
-            .ids()
-            .iter()
-            .filter_map(move |id| self.cache.get_cached(&**id))
+    pub fn iter_cached<'a: 'h>(
+        self,
+        cache: AnyCache<'a>,
+    ) -> impl Iterator<Item = Handle<'a, A>> + 'h {
+        self.ids().filter_map(move |id| cache.get_cached(id))
     }
 }
 
-impl<'a, A> DirHandle<'a, A>
+impl<'h, A> DirHandle<'h, A>
 where
     A: DirLoadable + Compound,
 {
@@ -291,11 +298,11 @@ where
     /// This function will happily try to load all assets, even if an error
     /// occured the last time it was tried.
     #[inline]
-    pub fn iter(self) -> impl ExactSizeIterator<Item = Result<Handle<'a, A>, Error>> {
-        self.inner
-            .ids()
-            .iter()
-            .map(move |id| self.cache.load(&**id))
+    pub fn iter<'a: 'h>(
+        self,
+        cache: AnyCache<'a>,
+    ) -> impl ExactSizeIterator<Item = Result<Handle<'a, A>, Error>> + 'h {
+        self.ids().map(move |id| cache.load(id))
     }
 }
 

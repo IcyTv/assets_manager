@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, io, sync::Arc};
 
 #[cfg(feature = "gltf")]
-pub use gltf::Gltf;
+pub use self::gltf::Gltf;
 
 /// An asset is a type loadable from raw bytes.
 ///
@@ -222,16 +222,13 @@ pub trait Compound: Sized + Send + Sync + 'static {
     ///
     /// This function should not perform any kind of I/O: such concern should be
     /// delegated to [`Asset`]s.
-    fn load(cache: AnyCache, id: &str) -> Result<Self, BoxedError>;
+    fn load(cache: AnyCache, id: &SharedString) -> Result<Self, BoxedError>;
 
     #[doc(hidden)]
-    fn _load_entry<P: PrivateMarker>(
-        cache: AnyCache,
-        id: &SharedString,
-    ) -> Result<CacheEntry, Error> {
-        match Self::load(cache, id) {
-            Ok(asset) => Ok(CacheEntry::new(asset, id.clone())),
-            Err(err) => Err(Error::new(id.clone(), err)),
+    fn _load_entry(cache: AnyCache, id: SharedString) -> Result<CacheEntry, Error> {
+        match Self::load(cache, &id) {
+            Ok(asset) => Ok(CacheEntry::new(asset, id, || cache.is_hot_reloaded())),
+            Err(err) => Err(Error::new(id, err)),
         }
     }
 
@@ -250,7 +247,7 @@ pub trait Compound: Sized + Send + Sync + 'static {
 #[inline]
 pub(crate) fn load_and_record(
     cache: AnyCache,
-    id: &SharedString,
+    id: SharedString,
     typ: Type,
 ) -> Result<CacheEntry, Error> {
     #[cfg(feature = "hot-reloading")]
@@ -259,16 +256,16 @@ pub(crate) fn load_and_record(
             match &typ.inner.typ {
                 crate::key::InnerType::Storable => (),
                 crate::key::InnerType::Asset(inner) => {
-                    let asset = (typ.inner.load)(cache, id)?;
-                    reloader.add_asset(id.clone(), crate::key::AssetType::new(typ.type_id, inner));
+                    let asset = (typ.inner.load)(cache, id.clone())?;
+                    reloader.add_asset(id, crate::key::AssetType::new(typ.type_id, inner));
                     return Ok(asset);
                 }
                 crate::key::InnerType::Compound(inner) => {
                     let (entry, deps) = crate::hot_reloading::records::record(reloader, || {
-                        (typ.inner.load)(cache, id)
+                        (typ.inner.load)(cache, id.clone())
                     });
                     let entry = entry?;
-                    reloader.add_compound(id.clone(), deps, typ, inner.reload);
+                    reloader.add_compound(id, deps, typ, inner.reload);
                     return Ok(entry);
                 }
             }
@@ -283,17 +280,14 @@ where
     A: Asset,
 {
     #[inline]
-    fn load(cache: AnyCache, id: &str) -> Result<Self, BoxedError> {
-        Ok(load_from_source(&cache.source(), id)?)
+    fn load(cache: AnyCache, id: &SharedString) -> Result<Self, BoxedError> {
+        Ok(load_from_source(&cache.raw_source(), id)?)
     }
 
     #[doc(hidden)]
-    fn _load_entry<P: PrivateMarker>(
-        cache: AnyCache,
-        id: &SharedString,
-    ) -> Result<CacheEntry, Error> {
-        let asset: Self = load_from_source(&cache.source(), id)?;
-        Ok(CacheEntry::new(asset, id.clone()))
+    fn _load_entry(cache: AnyCache, id: SharedString) -> Result<CacheEntry, Error> {
+        let asset: Self = load_from_source(&cache.raw_source(), &id)?;
+        Ok(CacheEntry::new(asset, id, || cache.is_hot_reloaded()))
     }
 
     const HOT_RELOADED: bool = Self::HOT_RELOADED;
@@ -309,7 +303,7 @@ impl<A> Compound for Arc<A>
 where
     A: Compound,
 {
-    fn load(cache: AnyCache, id: &str) -> Result<Self, BoxedError> {
+    fn load(cache: AnyCache, id: &SharedString) -> Result<Self, BoxedError> {
         let asset = cache.load_owned::<A>(id)?;
         Ok(Arc::new(asset))
     }
@@ -366,7 +360,7 @@ pub trait Storable: Sized + Send + Sync + 'static {
     /// let _ = handle.get();
     /// # Ok::<(), assets_manager::BoxedError>(())
     /// ```
-    const _CHECK_NOT_HOT_RELOADED: () = [()][Self::HOT_RELOADED as usize];
+    const _CHECK_NOT_HOT_RELOADED: () = assert!(!Self::HOT_RELOADED);
 
     #[doc(hidden)]
     #[inline]

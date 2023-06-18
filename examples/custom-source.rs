@@ -7,11 +7,10 @@
 
 use assets_manager::{
     hot_reloading::{DynUpdateSender, EventSender, FsWatcherBuilder},
-    source::{DirEntry, FileSystem, Source},
+    source::{DirEntry, FileContent, FileSystem, Source},
     AssetCache, BoxedError,
 };
 use std::{
-    borrow::Cow,
     io,
     path::{Path, PathBuf},
 };
@@ -29,9 +28,7 @@ impl FsWithOverride {
         let default_dir = FileSystem::new(default_path)?;
         let override_dir = std::env::var_os("ASSETS_OVERRIDE").and_then(|path| {
             FileSystem::new(path)
-                .map_err(|err| {
-                    log::error!("Error setting override assets directory: {}", err);
-                })
+                .map_err(|err| log::error!("Error setting override assets directory: {err}"))
                 .ok()
         });
 
@@ -47,7 +44,7 @@ impl FsWithOverride {
 }
 
 impl Source for FsWithOverride {
-    fn read(&self, id: &str, ext: &str) -> io::Result<Cow<[u8]>> {
+    fn read(&self, id: &str, ext: &str) -> io::Result<FileContent> {
         // Try override path
         if let Some(dir) = &self.override_dir {
             match dir.read(id, ext) {
@@ -55,7 +52,7 @@ impl Source for FsWithOverride {
                 Err(err) => {
                     if err.kind() != io::ErrorKind::NotFound {
                         let path = dir.path_of(DirEntry::File(id, ext));
-                        log::warn!("Error reading \"{}\": {}", path.display(), err);
+                        log::warn!("Error reading \"{}\": {err}", path.display());
                     }
                 }
             }

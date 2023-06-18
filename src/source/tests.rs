@@ -6,7 +6,7 @@ macro_rules! test_source {
         fn read_ok() {
             let source = $source;
             let content = source.read("test.b", "x").unwrap();
-            assert_eq!(&*content, &*b"-7");
+            assert_eq!(content.as_ref(), &*b"-7");
         }
 
         #[test]
@@ -71,7 +71,7 @@ mod filesystem {
         // Necessary because of `canonicalize`
         let path = {
             let mut path = fs.root().to_owned();
-            path.extend(&["test", "a"]);
+            path.extend(["test", "a"]);
             path.set_extension("x");
             path
         };

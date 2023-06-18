@@ -32,8 +32,6 @@
 //! - Image formats (with [`image`] crate): `bmp`, `jpeg`, `png` `webp`.
 //! - 3D formats (with [`gltf`] crate): `gltf`.
 //!
-//! [`gltf`]: `_gltf`
-//!
 //! ### Internal features
 //!
 //! These features change inner data structures implementations. They usually
@@ -203,6 +201,8 @@ pub mod source;
 pub mod hot_reloading;
 
 mod utils;
+#[cfg(feature = "utils")]
+pub use utils::cell::OnceInitCell;
 pub use utils::{SharedBytes, SharedString};
 
 #[cfg(test)]

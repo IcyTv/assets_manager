@@ -16,20 +16,18 @@ struct BorrowedCache<'a> {
 }
 
 impl<'a> crate::anycache::RawCache for BorrowedCache<'a> {
+    type Source = &'a dyn Source;
+
     fn assets(&self) -> &AssetMap {
         self.assets
     }
 
-    fn reloader(&self) -> Option<&super::HotReloader> {
-        Some(self.reloader)
-    }
-}
-
-impl<'a> crate::anycache::RawCacheWithSource for BorrowedCache<'a> {
-    type Source = &'a dyn Source;
-
     fn get_source(&self) -> &&'a (dyn Source + 'static) {
         &self.source
+    }
+
+    fn reloader(&self) -> Option<&super::HotReloader> {
+        Some(self.reloader)
     }
 }
 
@@ -47,7 +45,7 @@ impl<'a> BorrowedCache<'a> {
     }
 
     fn as_any_cache(&self) -> AnyCache {
-        crate::anycache::CacheWithSourceExt::_as_any_cache(self)
+        crate::anycache::CacheExt::_as_any_cache(self)
     }
 }
 
@@ -87,7 +85,7 @@ impl CacheKind {
     fn update(&mut self, key: OwnedKey, asset: Box<dyn AnyAsset>) {
         match self {
             CacheKind::Static(cache, _, to_reload) => {
-                if let Some(entry) = cache.get_entry(&key.id, key.type_id) {
+                if let Some(entry) = cache.get(&key.id, key.type_id) {
                     asset.reload(entry);
                     log::info!("Reloading \"{}\"", key.id);
                 }

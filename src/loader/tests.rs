@@ -38,7 +38,7 @@ fn bytes_loader_ok() {
 #[test]
 fn parse_loader_ok() {
     let n = rand::random::<i32>();
-    let s = &format!("{}", n);
+    let s = &format!("{n}");
     let raw = raw(s);
 
     let loaded: i32 = ParseLoader::load(raw, "").unwrap();
@@ -55,7 +55,7 @@ fn parse_loader_err() {
 #[test]
 fn from_other() {
     let n = rand::random::<i32>();
-    let s = &format!("{}", n);
+    let s = &format!("{n}");
     let raw = raw(s);
 
     let loaded: X = LoadFrom::<i32, ParseLoader>::load(raw, "").unwrap();
@@ -92,7 +92,7 @@ cfg_if::cfg_if! { if #[cfg(feature = "serde")] {
                 let point = rand::random::<Point>();
                 let raw = ($ser)(&point).unwrap().into();
 
-                let loaded: Point = <$loader>::load(raw, "").unwrap();
+                let loaded: Point = <$loader>::load(Cow::Owned(raw), "").unwrap();
 
                 assert_eq!(loaded, point);
             }
@@ -113,7 +113,7 @@ test_loader!(
     bincode_loader_ok,
     bincode_loader_err,
     BincodeLoader,
-    serde_bincode::serialize
+    bincode::serialize
 );
 
 #[cfg(feature = "json")]
@@ -129,20 +129,23 @@ test_loader!(
     msgpack_loader_ok,
     msgpack_err,
     MessagePackLoader,
-    serde_msgpack::encode::to_vec
+    rmp_serde::encode::to_vec
 );
 
 #[cfg(feature = "ron")]
-test_loader!(ron_loader_ok, ron_loader_err, RonLoader, |p| {
-    serde_ron::ser::to_string(p).map(String::into_bytes)
-});
+test_loader!(
+    ron_loader_ok,
+    ron_loader_err,
+    RonLoader,
+    ron::ser::to_string
+);
 
 #[cfg(feature = "toml")]
 test_loader!(
     toml_loader_ok,
     toml_loader_err,
     TomlLoader,
-    serde_toml::ser::to_vec
+    toml_edit::ser::to_string
 );
 
 #[cfg(feature = "yaml")]
@@ -150,5 +153,5 @@ test_loader!(
     yaml_loader_ok,
     yaml_loader_err,
     YamlLoader,
-    serde_yaml::to_vec
+    serde_yaml::to_string
 );
